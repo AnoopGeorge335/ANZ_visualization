@@ -1,0 +1,120 @@
+---
+title: "R Notebook-ANZ"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r}
+rm(list=ls())
+library(readxl)
+library(dplyr)
+library(tidyverse)
+library(visdat)
+library(ggplot2)
+library(cluster)
+library(factoextra)
+
+ANZ_dataset <- read_excel("D:/ANZ/ANZ synthesised transaction dataset.xlsx")
+attach(ANZ_dataset)
+#View(ANZ_dataset)
+ANZ_dataset$date<- as.Date(date)
+str(ANZ_dataset)
+summary(ANZ_dataset)
+```
+
+The error obtained while reading the file is because of unexpected values in biller_code column.
+```{r}
+#convert character to factor columns
+
+fact_cols <- names(dplyr::select_if(subset(ANZ_dataset,select = -c(account,long_lat,merchant_id,first_name,extraction,transaction_id,customer_id,merchant_long_lat)), is_character))
+ANZ_dataset[,fact_cols] <- lapply(ANZ_dataset[,fact_cols], factor)
+str(ANZ_dataset)
+vis_dat(ANZ_dataset)
+```
+bpay_biller_code and merchant_code has 92.67% missingness in data and hence can be removed
+From the vismiss plot, we can observe that for the rest of the columns containing missing values, all values missing are from the same rows and all these columns have 35.92% of missing data (4326 rows)
+```{r}
+ANZ_dataset <- subset(ANZ_dataset, select = -c(bpay_biller_code,merchant_code))
+lapply(ANZ_dataset,function(x) { length(which(is.na(x)))})
+head(ANZ_dataset)
+ANZ_dataset %>% filter(is.na(card_present_flag)) %>% filter(status=="posted") %>% count()
+ANZ_dataset  %>% filter(status=="posted") %>% count()
+```
+We can verify from above code that the missing values for the 5 columns are when the status is "posted"
+Data does not need to be cleansed as merchant details will be NA for posted transactions
+##Explanatory analysis
+There are 100 customer out of which 20 has the same customer first name
+```{r}
+unique(ANZ_dataset$first_name)
+
+```
+Michael is the most common first name, and has 6 different account users
+```{r}
+ANZ_dataset %>% group_by(first_name)%>% summarise(unique(account)) %>% count() %>% filter(n>1) 
+```
+
+```{r}
+#Defining Age Group
+ANZ_dataset1 <-mutate(ANZ_dataset,Age_group = ifelse(age <= 30 ,'teenage',ifelse(age >30 & age <50, 'midage','old')))
+#monthly salary
+ANZ_dataset2<-ANZ_dataset1 %>% group_by(account,first_name,format(date, "%m"),format(date, "%Y"),movement)%>% summarise(sum(amount))
+ANZ_dataset2<- ANZ_dataset2 %>% rename( month = "format(date, \"%m\")" ,year = "format(date, \"%Y\")",total_amount="sum(amount)" )
+
+#Total number of Transactions per month excluding credit
+AnZ2 <-ANZ_dataset1 %>% filter(movement!='credit')%>% group_by(account,first_name,format(date, "%m/%Y"),Age_group,gender)%>% count()
+#outlier analysis
+boxplot(AnZ2$n ~ AnZ2$Age_group,xlab = "Age Group",ylab = "Number of Transactions", main = "Monthy Transactions by age group")
+out <-boxplot.stats(AnZ2$n)$out
+out_ind <- which(AnZ2$n %in% c(out))
+AnZ2[out_ind, ]
+
+```
+```{r}
+boxplot(AnZ2$n ~ AnZ2$gender,xlab = "Gender",ylab = "Number of Transactions", main = "Monthy Transactions by Gender")
+
+ANZ_cred<-ANZ_dataset1 %>%filter(movement=='credit')%>% group_by(account,first_name,format(date, "%m/%Y")) %>%summarise(sum(amount)) %>%rename(credit="sum(amount)") 
+ANZ_debit<-ANZ_dataset1 %>%filter(movement=='debit')%>% group_by(account,first_name,format(date, "%m/%Y")) %>%summarise(sum(amount)) %>%rename(debit="sum(amount)") 
+ANZ_sal<-merge(ANZ_cred,ANZ_debit)
+ANZ_sal2<-ANZ_sal %>% mutate(avg_savings_monthly = credit - debit) %>% rename(date ="format(date, \"%m/%Y\")")
+ANZ_sal2 %>% ggplot(mapping = aes(x=date,y=avg_savings_monthly,label=first_name))+geom_point()+ geom_text()
+```
+
+There seems to be a number of outliers in below 30 age group.
+Further analysis shows that Diana and Michael have large number of transactions consistently (all 3 months) in their age group
+while Jeffery,Richard,Kimberly,Jessica and Rhonda has large number of transactions only in a particular month.
+Tonya has large number of transactions for 2 months
+From the boxplot, we can observe that Females tend to spend higher than males and has greater extent of distribution compared to males.
+```{r}
+#########cluster analysis
+ANZ_sal3<-ANZ_sal2%>% group_by(first_name,account) %>% summarise(credit=sum(credit),debit = sum(debit),savings=sum(avg_savings_monthly))
+str(ANZ_sal3)
+names(dplyr::select_if(ANZ_sal3,is.numeric))
+mydata <- scale(ANZ_sal3[,c("credit","debit","savings")])
+rownames(mydata) <- ANZ_sal3$account
+library(factoextra)
+fit <- kmeans(mydata, 3)
+fviz_cluster(fit, data = mydata)
+```
+## Map
+```{r}
+
+library(ggmap)
+library(tmap)
+library(splitstackshape)
+str(ANZ_dataset1)
+ANZ_map<-cSplit(ANZ_dataset1, 5, " ", drop=F) %>% rename(longitude_cust = long_lat_1, latitude_cust=long_lat_2)
+ANZ_map<-cSplit(ANZ_map, 20, " ", drop=F) %>% rename(longitude_merch = merchant_long_lat_1, latitude_merch=merchant_long_lat_2)
+ANZ_map%>% select("longitude_cust","latitude_cust")
+
+
+ggmap::register_google(key = "AIzaSyBVRB4Dngod3xK-dXAGCTIBIhIg-Pnpl4Y")
+myMap <- get_map(location = "Australia", zoom = 4)
+ggmap(myMap)  + geom_point(data = ANZ_map,aes(x = longitude_merch,y = latitude_merch,col='red')) + geom_point(data = ANZ_map%>% select("longitude_cust","latitude_cust"),aes(x = longitude_cust,y = latitude_cust))
+```
+
+Most of the merchants are scattered throughout the Australia and Tasmania while users are in populated cities. This is as expected.
+
+
